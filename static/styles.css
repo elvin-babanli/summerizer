@@ -121,8 +121,11 @@ body{margin:0;overflow:hidden}
 
 /* Result / Editor */
 .result-form{display:flex;flex-direction:column;gap:12px;height:100%}
-.editor{
-  flex:1;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--text);
-  padding:16px 18px;font-family:var(--mono);font-size:.98rem;line-height:1.62;overflow:auto;white-space:pre-wrap
+
+.editor {
+  width: 100%;
+  height: 60vh;
+  resize: none;
+  overflow: auto;      
+  box-sizing: border-box;
 }
-.result-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:10px}
