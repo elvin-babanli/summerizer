@@ -6,8 +6,6 @@ from textwrap import wrap
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-from services.openai_client import call_llm
-
 
 from flask import (
     Flask, request, session, render_template, redirect,
@@ -22,38 +20,34 @@ from config import ProductionConfig
 from database import db
 from models import UserSession
 from utils.privacy import hash_ip
+from services.openai_client import call_llm  # lazy client-in içində qurulur
 
 
-
+# ----------------- Utilities -----------------
 def strip_banner(text: str) -> str:
     """Result-un əvvəlindəki [SUMMARY · …] və LLM error sətirlərini silir."""
     if not text:
-        return text
-    # 1) İlk sətirdəki [ ... ] formalı banner
+        return ""
     text = re.sub(r"^\s*\[[^\]\n]+\]\s*\n+", "", text, flags=re.MULTILINE)
-    # 2) LLM error sətiri
     text = re.sub(r"^\s*\(LLM error.*\)\s*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    # 3) “Showing a minimal fallback …” sətiri
     text = re.sub(r"^\s*Showing a minimal fallback.*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
     return text.strip()
 
-# ----------------- LLM -----------------
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # istəsən .env ilə dəyiş
-# OpenAI SDK (modern)
+
+# ----------------- LLM flag -----------------
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 try:
-    from openai import OpenAI
+    from openai import OpenAI  # noqa: F401
     _OPENAI_AVAILABLE = True
 except Exception:
     _OPENAI_AVAILABLE = False
 
+
 # ===================== Helpers (storage, stats, files) =====================
-
 ALLOWED_EXTS = {".pdf", ".docx", ".txt"}
-
 
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
-
 
 def get_dir_size_mb(p: Path) -> float:
     if not p.exists():
@@ -63,7 +57,6 @@ def get_dir_size_mb(p: Path) -> float:
         if child.is_file():
             total += child.stat().st_size
     return total / (1024 * 1024)
-
 
 def cleanup_storage(app: Flask):
     """
@@ -104,7 +97,6 @@ def cleanup_storage(app: Flask):
         except Exception:
             break
 
-
 def count_pages_saved_file(filepath: Path) -> int:
     """PDF üçün real səhifə sayı, .docx/.txt üçün 1 qaytarır."""
     if not filepath.exists():
@@ -119,7 +111,6 @@ def count_pages_saved_file(filepath: Path) -> int:
             return 0
     return 1
 
-
 def extract_text_from_file(path: Path, max_chars: int = 50_000) -> str:
     """Fayldan mətni çıxarır (PDF/DOCX/TXT). max_chars ilə kəsir."""
     ext = path.suffix.lower()
@@ -129,14 +120,12 @@ def extract_text_from_file(path: Path, max_chars: int = 50_000) -> str:
             from PyPDF2 import PdfReader
             with open(path, "rb") as f:
                 reader = PdfReader(f)
-                # səhifə limitini artıq upload mərhələsində yoxlayırıq; burada hamısını oxuya bilərik
                 for page in reader.pages:
                     t = page.extract_text() or ""
                     if t:
                         text += t + "\n"
                     if len(text) >= max_chars:
                         break
-
         elif ext == ".docx":
             from docx import Document
             doc = Document(path)
@@ -145,7 +134,6 @@ def extract_text_from_file(path: Path, max_chars: int = 50_000) -> str:
                     text += p.text + "\n"
                 if len(text) >= max_chars:
                     break
-
         elif ext == ".txt":
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read(max_chars)
@@ -153,9 +141,7 @@ def extract_text_from_file(path: Path, max_chars: int = 50_000) -> str:
             return ""
     except Exception:
         return ""
-
     return text[:max_chars].strip()
-
 
 def gather_corpus(app: Flask, max_chars_total: int = 80_000) -> tuple[str, list[dict]]:
     """
@@ -195,7 +181,6 @@ def gather_corpus(app: Flask, max_chars_total: int = 80_000) -> tuple[str, list[
 
     return ("\n\n".join(texts)).strip(), metas
 
-
 def bump_session_stats(bytes_added: int = 0, pages_added: int = 0):
     """Upload/Remove zamanı ölçü və səhifə sayını sessiya qeydinə əlavə/çıxar."""
     try:
@@ -218,12 +203,8 @@ def bump_session_stats(bytes_added: int = 0, pages_added: int = 0):
     except Exception:
         db.session.rollback()
 
-
 def compute_bucket_stats(app: Flask) -> dict:
-    """
-    Cari sessiya bucket-i üçün: files, pages, bytes.
-    Diskdən oxuyur və DB ilə maksimum dəyərlə uzlaşdırır.
-    """
+    """Cari sessiya bucket-i üçün: files, pages, bytes."""
     bucket = session.get("bucket")
     stats = {"files": 0, "pages": 0, "bytes": 0}
     if not bucket:
@@ -254,7 +235,6 @@ def compute_bucket_stats(app: Flask) -> dict:
 
     return stats
 
-
 def expose_limits(app: Flask) -> dict:
     """Şablona limitləri ötürmək üçün helper."""
     return {
@@ -264,7 +244,6 @@ def expose_limits(app: Flask) -> dict:
         "retention_hours": app.config["RETENTION_HOURS"],
         "max_storage_mb_total": app.config["MAX_STORAGE_MB_TOTAL"],
     }
-
 
 def list_bucket_files(app: Flask) -> list[dict]:
     """
@@ -300,23 +279,22 @@ def list_bucket_files(app: Flask) -> list[dict]:
             "size_bytes": size_b,
         })
     return files
-    
+
 
 # ===================== App Factory =====================
-from flask_wtf.csrf import CSRFProtect
 def create_app():
     load_dotenv()
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.from_object(ProductionConfig)
 
+    # --- CSRF / Security ---
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-change-me')
     app.config['WTF_CSRF_ENABLED'] = True
     app.config['WTF_CSRF_TIME_LIMIT'] = None
-    app.config['WTF_CSRF_SSL_STRICT'] = False
-    app.config['WTF_CSRF_CHECK_ORIGIN'] = False
+    app.config['WTF_CSRF_SSL_STRICT'] = False         # Referrer məcbur yoxlanmasın
+    app.config['WTF_CSRF_CHECK_ORIGIN'] = False       # (istəyə bağlı) origin yoxlaması
     app.config['SESSION_COOKIE_SECURE'] = True
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-
     csrf = CSRFProtect(app)
 
     # Qovluqlar
@@ -328,10 +306,6 @@ def create_app():
     with app.app_context():
         db.create_all()
 
-    # CSRF
-    csrf = CSRFProtect(app)
-    
-
     # Rate Limit (ENV-dən storage oxu; lokalda memory:// xəbərdarlığı susdurur)
     storage_uri = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
     limiter = Limiter(
@@ -340,8 +314,6 @@ def create_app():
         default_limits=["200 per day", "50 per hour"],
         storage_uri=storage_uri
     )
-
-    
 
     # ------------- Session/Bucket & Anon Tracking -------------
     @app.before_request
@@ -374,7 +346,8 @@ def create_app():
     def set_headers(resp):
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["Referrer-Policy"] = "no-referrer"
+        # ⚠️ Referrer-Policy no-referrer DEYIL! CSRF üçün uyğun variant:
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         resp.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' data:; "
             "style-src 'self' 'unsafe-inline'; script-src 'self'"
@@ -390,7 +363,6 @@ def create_app():
             pass
 
     # ===================== Routes =====================
-
     @app.route("/")
     def index():
         stats = compute_bucket_stats(app)
@@ -407,7 +379,6 @@ def create_app():
         }
         languages = ["English", "Azerbaijani", "Turkish", "Russian", "Polish"]
         result_text = session.get("last_result_text", "")
-
 
         return render_template(
             "index.html",
@@ -464,7 +435,7 @@ def create_app():
             if bdir.exists():
                 for f in bdir.rglob("*"):
                     if f.is_file():
-                        f.unlink(missing_ok=True)
+                        f.unlink(missing_okay=True)
                 try:
                     bdir.rmdir()
                 except Exception:
@@ -546,7 +517,6 @@ def create_app():
                 continue
 
             if pages_this_upload + pages > max_total_pages:
-                # Limitdən artıqdır — bu faylı geri qaytarırıq
                 try:
                     target_path.unlink(missing_ok=True)
                 except Exception:
@@ -596,7 +566,6 @@ def create_app():
             flash("File not found.", "error")
 
         return redirect(url_for("index"))
-    
 
     # ---------- GENERATE (real LLM) ----------
     @app.route("/generate", methods=["POST"])
@@ -608,21 +577,19 @@ def create_app():
         output = request.form.get("output", "pdf")
         notes = request.form.get("notes", "")
 
-        # Fayllardan korpus
-        # corpus, metas = gather_corpus(app, max_chars_total=80_000)
-        corpus, metas = gather_corpus(app, max_chars=120000)
+        # Fayllardan korpus — DÜZGÜN ARGUMENT ADI
+        corpus, metas = gather_corpus(app, max_chars_total=120000)
         if not corpus:
             flash("No extracted text from your uploads. Please upload readable files.", "error")
             return redirect(url_for("index"))
 
         # OpenAI açarı yoxdursa DEMO nəticə ilə davam et
         if not _OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
-           result_text = (
-            f"(Demo mode — please set OPENAI_API_KEY in .env)\n\n"
-            f"Task: {task}, Language: {language}, Target: ~{words} words\n\n"
-            f"Sources preview:\n{corpus[:1000]}"
-        )
-          
+            result_text = (
+                f"(Demo mode — please set OPENAI_API_KEY in .env)\n\n"
+                f"Task: {task}, Language: {language}, Target: ~{words} words\n\n"
+                f"Sources preview:\n{corpus[:1000]}"
+            )
         else:
             try:
                 # Real LLM cavabı (bizim call_llm modulundan)
@@ -632,9 +599,7 @@ def create_app():
                 # LLM error zamanı fallback
                 result_text = f"(LLM error: {e})\n\n{corpus[:1200]}"
 
-
-
-        # >>> Seçilən format və son nəticə sessiyada saxlanılır (export üçün)
+        # Export üçün sessiyada saxla
         session["export_format"] = output
         session["last_result_text"] = result_text
 
@@ -656,7 +621,6 @@ def create_app():
             result_text=result_text,
         )
 
-
     # ---------- EXPORT (TXT / PDF / DOCX) ----------
     @app.route("/export", methods=["POST"])
     @limiter.limit("20/hour")
@@ -664,6 +628,7 @@ def create_app():
         # Form boş gələrsə sessiyadan götür
         raw = request.form.get("result_text")
         result_text = (raw if raw is not None and raw.strip() != "" else session.get("last_result_text", "")).strip()
+        result_text = strip_banner(result_text)  # <<< başlıq və errorları burda da təmizlə
         if not result_text:
             flash("Nothing to export.", "error")
             return redirect(url_for("index"))
@@ -678,16 +643,21 @@ def create_app():
 
         if fmt == "pdf":
             # -------- PDF export (reportlab) --------
-            from io import BytesIO
-            from textwrap import wrap
             from reportlab.lib.pagesizes import A4
             from reportlab.pdfgen import canvas
             from reportlab.lib.units import cm
-
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
+
             FONT_PATH = os.path.join(app.root_path, "static", "fonts", "DejaVuSans.ttf")
-            pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
+            # Font mövcuddursa register et
+            font_name = "Helvetica"
+            try:
+                if os.path.exists(FONT_PATH):
+                    pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
+                    font_name = "DejaVuSans"
+            except Exception:
+                pass
 
             bio = BytesIO()
             c = canvas.Canvas(bio, pagesize=A4)
@@ -698,12 +668,9 @@ def create_app():
             top, bottom = height - 2 * cm, 2 * cm
             max_width = right - left
             line_height = 14
-            
-            
-            
 
             # Mətni sətirlərə böl
-            c.setFont("DejaVuSans", 11)
+            c.setFont(font_name, 11)
             avg_char_w = 5.0
             chars_per_line = max(40, int(max_width / avg_char_w))
             lines = []
@@ -717,7 +684,7 @@ def create_app():
             for line in lines:
                 if y <= bottom:
                     c.showPage()
-                    c.setFont("DejaVuSans", 11)
+                    c.setFont(font_name, 11)
                     y = top
                 c.drawString(left, y, line)
                 y -= line_height
@@ -729,7 +696,6 @@ def create_app():
 
         elif fmt == "docx":
             # -------- DOCX export (python-docx) --------
-            from io import BytesIO
             from docx import Document
             from docx.shared import Pt
 
@@ -742,7 +708,7 @@ def create_app():
                 p = doc.add_paragraph()
                 lines = block.splitlines()
                 if not lines:
-                    p.add_run("") 
+                    p.add_run("")
                 else:
                     p.add_run(lines[0])
                     for ln in lines[1:]:
@@ -761,7 +727,6 @@ def create_app():
 
         else:
             # -------- TXT export --------
-            from io import BytesIO
             bio = BytesIO(result_text.encode("utf-8"))
             fname = f"summary_{bucket[:8]}_{ts}.txt"
             return send_file(
@@ -771,7 +736,6 @@ def create_app():
                 download_name=fname
             )
 
-    # create_app funksiyasının sonu
     return app
 
 
