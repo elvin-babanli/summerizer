@@ -302,7 +302,9 @@ def create_app():
         db.create_all()
 
     # CSRF
-    CSRFProtect(app)
+    from flask_wtf.csrf import CSRFProtect
+    csrf = CSRFProtect(app)
+    
 
     # Rate Limit (ENV-dən storage oxu; lokalda memory:// xəbərdarlığı susdurur)
     storage_uri = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
@@ -390,6 +392,7 @@ def create_app():
         )
 
     @app.route("/healthz")
+    @csrf.exempt
     def healthz():
         return jsonify(ok=True, time=datetime.utcnow().isoformat())
 
