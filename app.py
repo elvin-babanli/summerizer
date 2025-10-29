@@ -5,6 +5,9 @@ from io import BytesIO
 from textwrap import wrap
 from datetime import datetime, timedelta
 from pathlib import Path
+import re
+from services.openai_client import call_llm
+
 
 from flask import (
     Flask, request, session, render_template, redirect,
@@ -19,6 +22,20 @@ from config import ProductionConfig
 from database import db
 from models import UserSession
 from utils.privacy import hash_ip
+
+
+
+def strip_banner(text: str) -> str:
+    """Result-un əvvəlindəki [SUMMARY · …] və LLM error sətirlərini silir."""
+    if not text:
+        return text
+    # 1) İlk sətirdəki [ ... ] formalı banner
+    text = re.sub(r"^\s*\[[^\]\n]+\]\s*\n+", "", text, flags=re.MULTILINE)
+    # 2) LLM error sətiri
+    text = re.sub(r"^\s*\(LLM error.*\)\s*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    # 3) “Showing a minimal fallback …” sətiri
+    text = re.sub(r"^\s*Showing a minimal fallback.*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    return text.strip()
 
 # ----------------- LLM -----------------
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # istəsən .env ilə dəyiş
@@ -283,7 +300,7 @@ def list_bucket_files(app: Flask) -> list[dict]:
             "size_bytes": size_b,
         })
     return files
-
+    
 
 # ===================== App Factory =====================
 from flask_wtf.csrf import CSRFProtect
@@ -581,17 +598,6 @@ def create_app():
         return redirect(url_for("index"))
     
 
-
-
-
-
-
-
-
-
-
-
-
     # ---------- GENERATE (real LLM) ----------
     @app.route("/generate", methods=["POST"])
     @limiter.limit("6/minute")
@@ -603,58 +609,30 @@ def create_app():
         notes = request.form.get("notes", "")
 
         # Fayllardan korpus
-        corpus, metas = gather_corpus(app, max_chars_total=80_000)
+        # corpus, metas = gather_corpus(app, max_chars_total=80_000)
+        corpus, metas = gather_corpus(app, max_chars=120000)
         if not corpus:
             flash("No extracted text from your uploads. Please upload readable files.", "error")
             return redirect(url_for("index"))
 
         # OpenAI açarı yoxdursa DEMO nəticə ilə davam et
         if not _OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
-            result_text = (
-                f"[{task.upper()} · {language} · ~{words} words]\n\n"
-                f"Notes:\n{notes}\n\n"
-                f"(Demo output — set OPENAI_API_KEY in .env to enable real summarization.)"
-            )
+           result_text = (
+            f"(Demo mode — please set OPENAI_API_KEY in .env)\n\n"
+            f"Task: {task}, Language: {language}, Target: ~{words} words\n\n"
+            f"Sources preview:\n{corpus[:1000]}"
+        )
+          
         else:
-            # Prompt
-            system_msg = (
-                "You are a helpful assistant that writes concise, well-structured outputs "
-                "STRICTLY based on the provided sources. Do not invent facts not present in the sources."
-            )
-            task_line = {
-                "summary": "Write a concise summary.",
-                "detailed": "Write a detailed, structured summary.",
-                "study": "Create study notes with bullet points and key takeaways.",
-                "presentation": "Create slide-ready bullet points with section headers."
-            }.get(task, "Write a concise summary.")
-
-            user_msg = (
-                f"Language: {language}\n"
-                f"Target length: approx {words} words (±10%).\n"
-                f"Task: {task_line}\n"
-                f"User notes (must address if possible): {notes or '(none)'}\n\n"
-                f"=== SOURCES (combined from uploaded files) ===\n{corpus}\n"
-            )
-
             try:
-                client = OpenAI()
-                resp = client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    temperature=0.4,
-                )
-                result_text = resp.choices[0].message.content.strip()
+                # Real LLM cavabı (bizim call_llm modulundan)
+                llm_text = call_llm(task=task, words=words, language=language, notes=notes, corpus=corpus)
+                result_text = strip_banner(llm_text)
             except Exception as e:
-                # LLM xətasında təhlükəsiz fallback
-                result_text = (
-                    f"[{task.upper()} · {language} · ~{words} words]\n\n"
-                    f"(LLM error occurred: {e})\n"
-                    f"Showing a minimal fallback summary from local extraction.\n\n"
-                    f"{corpus[:1200]}"
-                )
+                # LLM error zamanı fallback
+                result_text = f"(LLM error: {e})\n\n{corpus[:1200]}"
+
+
 
         # >>> Seçilən format və son nəticə sessiyada saxlanılır (export üçün)
         session["export_format"] = output
@@ -679,7 +657,7 @@ def create_app():
         )
 
 
-        # ---------- EXPORT (TXT / PDF / DOCX) ----------
+    # ---------- EXPORT (TXT / PDF / DOCX) ----------
     @app.route("/export", methods=["POST"])
     @limiter.limit("20/hour")
     def export():
@@ -716,11 +694,13 @@ def create_app():
             width, height = A4
 
             # Marginlər
-            left = 2 * cm
-            right = width - 2 * cm
-            top = height - 2 * cm
-            bottom = 2 * cm
+            left, right = 2 * cm, width - 2 * cm
+            top, bottom = height - 2 * cm, 2 * cm
             max_width = right - left
+            line_height = 14
+            
+            
+            
 
             # Mətni sətirlərə böl
             c.setFont("DejaVuSans", 11)
@@ -734,11 +714,10 @@ def create_app():
                     lines.extend(wrap(para, width=chars_per_line))
 
             y = top
-            line_height = 14
             for line in lines:
                 if y <= bottom:
                     c.showPage()
-                    c.setFont("Helvetica", 11)
+                    c.setFont("DejaVuSans", 11)
                     y = top
                 c.drawString(left, y, line)
                 y -= line_height
@@ -763,7 +742,7 @@ def create_app():
                 p = doc.add_paragraph()
                 lines = block.splitlines()
                 if not lines:
-                    p.add_run("")  # boş paraqraf
+                    p.add_run("") 
                 else:
                     p.add_run(lines[0])
                     for ln in lines[1:]:
