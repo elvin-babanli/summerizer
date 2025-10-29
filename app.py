@@ -286,7 +286,7 @@ def list_bucket_files(app: Flask) -> list[dict]:
 
 
 # ===================== App Factory =====================
-
+from flask_wtf.csrf import CSRFProtect
 def create_app():
     load_dotenv()
     app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -312,7 +312,6 @@ def create_app():
         db.create_all()
 
     # CSRF
-    from flask_wtf.csrf import CSRFProtect
     csrf = CSRFProtect(app)
     
 
@@ -324,6 +323,8 @@ def create_app():
         default_limits=["200 per day", "50 per hour"],
         storage_uri=storage_uri
     )
+
+    
 
     # ------------- Session/Bucket & Anon Tracking -------------
     @app.before_request
