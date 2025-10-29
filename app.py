@@ -292,6 +292,16 @@ def create_app():
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.from_object(ProductionConfig)
 
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-change-me')
+    app.config['WTF_CSRF_ENABLED'] = True
+    app.config['WTF_CSRF_TIME_LIMIT'] = None
+    app.config['WTF_CSRF_SSL_STRICT'] = False
+    app.config['WTF_CSRF_CHECK_ORIGIN'] = False
+    app.config['SESSION_COOKIE_SECURE'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+    csrf = CSRFProtect(app)
+
     # Qovluqlar
     Path("instance").mkdir(exist_ok=True)
     Path(app.config["UPLOAD_FOLDER"]).mkdir(exist_ok=True, parents=True)
