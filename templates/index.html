@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="split">
+  <!-- LEFT COLUMN -->
+  <aside class="panel left">
+    <!-- SOURCES -->
+    <div class="card">
+      <div class="card-head compact">
+        <h2>Sources</h2>
+      </div>
+
+      <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="uploader">
+        <label class="dropzone" for="filePicker">
+          <div class="dz-icon">⬆</div>
+          <div class="dz-text">
+            <b>Drop files here</b>
+            <span>or click to browse</span>
+            <div class="dz-meta">
+              Max {{ limits.max_files }} files · {{ limits.max_file_mb }}MB/file · ≤ {{ limits.max_total_pages }} pages total
+            </div>
+          </div>
+        </label>
+        <input id="filePicker" type="file" name="files" multiple accept=".pdf,.docx,.txt" />
+        <div class="uploader-actions">
+          <button type="submit" class="btn primary">Upload</button>
+        </div>
+
+        <!-- CSRF -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      </form>
+
+      <!-- STATS -->
+      <div class="uploader-stats">
+        <div class="stat"><span class="k">Files</span><span class="v">{{ stats.files }}</span></div>
+        <div class="stat"><span class="k">Pages</span><span class="v">{{ stats.pages }}</span></div>
+        <div class="stat">
+          <span class="k">Size</span>
+          <span class="v">{{ (stats.bytes/(1024*1024))|round(2) }} MB</span>
+        </div>
+      </div>
+
+      <div class="filelist">
+        {% if files %}
+        <ul>
+          {% for f in files %}
+          <li>
+            <div class="file-main">
+              <div class="file-name" title="{{ f.name }}">{{ f.name }}</div>
+              <div class="chips">
+                <span class="chip">{{ f.ext|upper }}</span>
+                <span class="chip">{{ f.pages }}p</span>
+                <span class="chip">{{ (f.size_bytes/(1024*1024))|round(2) }}MB</span>
+              </div>
+            </div>
+            <form action="{{ url_for('remove', fid=f.id) }}" method="post">
+              <button class="btn danger tiny">remove</button>
+              <!-- CSRF -->
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+          <div class="tiny muted">No files uploaded yet.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- OPTIONS -->
+    <div class="card">
+      <div class="card-head"><h3>Task & Options</h3></div>
+
+      <form action="{{ url_for('generate') }}" method="post" class="options no-scroll">
+        <div class="segmented">
+          <label class="seg"><input type="radio" name="task" value="summary"     {{ 'checked' if options.task=='summary' }}><span>Summary</span></label>
+          <label class="seg"><input type="radio" name="task" value="detailed"    {{ 'checked' if options.task=='detailed' }}><span>Detailed</span></label>
+          <label class="seg"><input type="radio" name="task" value="study"       {{ 'checked' if options.task=='study' }}><span>Study notes</span></label>
+          <label class="seg"><input type="radio" name="task" value="presentation"{{ 'checked' if options.task=='presentation' }}><span>Presentation</span></label>
+        </div>
+
+        <div class="grid">
+          <label class="field">
+            <span class="label">Words</span>
+            <input type="number" name="words" min="200" max="20000" step="50" value="{{ options.words }}">
+          </label>
+
+          <label class="field">
+            <span class="label">Language</span>
+            <select name="language">
+              {% for lang in languages %}
+              <option value="{{ lang }}" {{ 'selected' if options.language==lang }}>{{ lang }}</option>
+              {% endfor %}
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="label">Output</span>
+            <select name="output">
+              <option value="pdf"  {{ 'selected' if options.output=='pdf'  }}>PDF</option>
+              <option value="docx" {{ 'selected' if options.output=='docx' }}>Word</option>
+              <option value="txt"  {{ 'selected' if options.output=='txt'  }}>TXT</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="field flex-1">
+          <span class="label">User notes</span>
+          <textarea name="notes" rows="5" placeholder="Questions to be answered strictly from your uploads...">{{ options.notes }}</textarea>
+        </label>
+
+        <div class="actions sticky">
+          <button class="btn primary">Generate</button>
+        </div>
+
+        <!-- CSRF -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      </form>
+    </div>
+  </aside>
+
+  <!-- RIGHT COLUMN -->
+  <section class="panel right">
+    <div class="card result">
+      <div class="card-head"><h2>Result</h2></div>
+      <form action="{{ url_for('export') }}" method="post" class="result-form">
+        <textarea name="result_text" class="editor" spellcheck="false" placeholder="Result will appear here after generation...">{{ result_text }}</textarea>
+        <div class="result-toolbar">
+          <div></div>
+          <div class="actions"><button class="btn primary">Save & Download</button></div>
+        </div>
+
+        <!-- CSRF -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      </form>
+    </div>
+  </section>
+</section>
+{% endblock %}

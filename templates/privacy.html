@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card" style="max-width:800px;margin:0 auto;">
+  <h2>Privacy & Data</h2>
+  <p>We store anonymous usage metadata (session UUID, hashed IP, user agent) to protect capacity and improve stability. Uploaded files are kept temporarily and auto-deleted after the retention window. You can erase your data anytime.</p>
+  <form action="{{ url_for('privacy_delete') }}" method="post" style="margin-top:1rem;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn danger" type="submit">Delete my data now</button>
+  </form>
+</section>
+{% endblock %}
