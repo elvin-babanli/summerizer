@@ -301,6 +301,15 @@ def create_app():
     Path("instance").mkdir(exist_ok=True)
     Path(app.config["UPLOAD_FOLDER"]).mkdir(exist_ok=True, parents=True)
 
+    try:
+        from config import DB_DIR  
+        Path(DB_DIR).mkdir(exist_ok=True, parents=True)
+    except Exception:
+        pass
+
+
+
+
     # DB
     db.init_app(app)
     with app.app_context():
