@@ -15,9 +15,6 @@ class Config:
     PREFERRED_URL_SCHEME = "https"
 
 
-# config.py
-import os
-
 class ProductionConfig:
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
