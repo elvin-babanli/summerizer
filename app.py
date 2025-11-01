@@ -1,6 +1,9 @@
 
 from __future__ import annotations
-from flask_session import Session
+try:
+    from flask_session import Session
+except Exception:
+    Session = None
 import os
 import io
 import re
@@ -70,19 +73,26 @@ def create_app() -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB per request
     app.config["MAX_TOTAL_PAGES"] = int(os.getenv("MAX_TOTAL_PAGES", "250"))
     app.config["TEMPLATES_AUTO_RELOAD"] = True
-    app.config["SESSION_TYPE"] = "filesystem"
-    app.config["SESSION_FILE_DIR"] = os.path.join(BASE_DIR, ".flask_session")
-    app.config["SESSION_PERMANENT"] = False
-    app.config["SESSION_USE_SIGNER"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-    app.config["SESSION_COOKIE_SECURE"] = False  # dev mühitdə False, prod-da True
-
     # Session(app)
+
+    try:
+        from flask_session import Session
+        app.config["SESSION_TYPE"] = "filesystem"
+        app.config["SESSION_FILE_DIR"] = os.path.join(BASE_DIR, ".flask_session")
+        app.config["SESSION_PERMANENT"] = False
+        app.config["SESSION_USE_SIGNER"] = True
+        app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+        app.config["SESSION_COOKIE_SECURE"] = False  # dev mühitdə False, prod-da True
+        os.makedirs(app.config["SESSION_FILE_DIR"], exist_ok=True)
+        Session(app)
+    except ImportError:
+        # Flask-Session quraşdırılmayıbsa (Render deploy zamanı) app yenə işləyəcək
+        print("⚠️ Flask-Session tapılmadı — cookie-based session aktivdir.")
 
     # Ensure folders exist
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     os.makedirs(app.config["OUTPUT_FOLDER"], exist_ok=True)
-    os.makedirs(app.config["SESSION_FILE_DIR"], exist_ok=True)
+    # os.makedirs(app.config["SESSION_FILE_DIR"], exist_ok=True)
 
 
     # CSRF
