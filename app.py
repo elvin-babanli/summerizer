@@ -1,754 +1,449 @@
-# app.py
+
+from __future__ import annotations
+from flask_session import Session
 import os
-import uuid
-from io import BytesIO
-from textwrap import wrap
-from datetime import datetime, timedelta
-from pathlib import Path
+import io
 import re
-
+from datetime import datetime
+from typing import List, Any
 from flask import (
-    Flask, request, session, render_template, redirect,
-    url_for, flash, jsonify, abort, send_file
+    Flask, render_template, request, redirect, url_for,
+    send_file, session, flash, jsonify, current_app
 )
-from flask_wtf.csrf import CSRFProtect
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from dotenv import load_dotenv
+from werkzeug.utils import secure_filename
 
-from config import ProductionConfig
-from database import db
-from models import UserSession
-from utils.privacy import hash_ip
-from services.openai_client import call_llm  # lazy client-in içində qurulur
+# CSRF
+from flask_wtf import CSRFProtect
 
-
-# ----------------- Utilities -----------------
-def strip_banner(text: str) -> str:
-    """Result-un əvvəlindəki [SUMMARY · …] və LLM error sətirlərini silir."""
-    if not text:
-        return ""
-    text = re.sub(r"^\s*\[[^\]\n]+\]\s*\n+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*\(LLM error.*\)\s*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r"^\s*Showing a minimal fallback.*\n+", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    return text.strip()
-
-
-# ----------------- LLM flag -----------------
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# Rate limit (optional but supported)
 try:
-    from openai import OpenAI  # noqa: F401
-    _OPENAI_AVAILABLE = True
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
 except Exception:
-    _OPENAI_AVAILABLE = False
+    Limiter = None
+    def get_remote_address():  # type: ignore
+        return "127.0.0.1"
+
+# Processing service
+from services.summarizer import (
+    GenerateOptions,
+    FileAnalyzer,
+    SummarizerService,
+    build_base_filename,
+)
+
+# Optional exports
+try:
+    from docx import Document  # python-docx
+except Exception:
+    Document = None  # type: ignore
+
+# PDF export (Unicode)
+try:
+    from reportlab.pdfgen import canvas  # type: ignore
+    from reportlab.pdfbase import pdfmetrics  # type: ignore
+    from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
+except Exception:
+    canvas = None  # type: ignore
+    pdfmetrics = None  # type: ignore
+    TTFont = None  # type: ignore
 
 
-# ===================== Helpers (storage, stats, files) =====================
-ALLOWED_EXTS = {".pdf", ".docx", ".txt"}
+# -----------------------------------------------------------------------------
+# Flask App Factory
+# -----------------------------------------------------------------------------
 
-def allowed_file(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXTS
-
-def get_dir_size_mb(p: Path) -> float:
-    if not p.exists():
-        return 0.0
-    total = 0
-    for child in p.rglob("*"):
-        if child.is_file():
-            total += child.stat().st_size
-    return total / (1024 * 1024)
-
-def cleanup_storage(app: Flask):
-    """
-    RETENTION_HOURS keçmiş sessiya qovluqlarını silir
-    və MAX_STORAGE_MB_TOTAL aşılarsa ən köhnələri təmizləyir.
-    """
-    uploads_dir = Path(app.config["UPLOAD_FOLDER"])
-    if not uploads_dir.exists():
-        return
-
-    now = datetime.utcnow()
-    ttl = timedelta(hours=app.config["RETENTION_HOURS"])
-
-    # 1) Zaman əsaslı təmizləmə
-    for bucket_dir in uploads_dir.iterdir():
-        if bucket_dir.is_dir():
-            try:
-                mtime = datetime.utcfromtimestamp(bucket_dir.stat().st_mtime)
-                if now - mtime > ttl:
-                    for f in bucket_dir.rglob("*"):
-                        if f.is_file():
-                            f.unlink(missing_ok=True)
-                    bucket_dir.rmdir()
-            except Exception:
-                pass
-
-    # 2) Disk kvotası təmizləmə
-    while get_dir_size_mb(uploads_dir) > app.config["MAX_STORAGE_MB_TOTAL"]:
-        dirs = [d for d in uploads_dir.iterdir() if d.is_dir()]
-        if not dirs:
-            break
-        oldest = min(dirs, key=lambda d: d.stat().st_mtime)
-        try:
-            for f in oldest.rglob("*"):
-                if f.is_file():
-                    f.unlink(missing_ok=True)
-            oldest.rmdir()
-        except Exception:
-            break
-
-def count_pages_saved_file(filepath: Path) -> int:
-    """PDF üçün real səhifə sayı, .docx/.txt üçün 1 qaytarır."""
-    if not filepath.exists():
-        return 0
-    if filepath.suffix.lower() == ".pdf":
-        try:
-            from PyPDF2 import PdfReader
-            with open(filepath, "rb") as f:
-                reader = PdfReader(f)
-                return len(reader.pages)
-        except Exception:
-            return 0
-    return 1
-
-def extract_text_from_file(path: Path, max_chars: int = 50_000) -> str:
-    """Fayldan mətni çıxarır (PDF/DOCX/TXT). max_chars ilə kəsir."""
-    ext = path.suffix.lower()
-    text = ""
-    try:
-        if ext == ".pdf":
-            from PyPDF2 import PdfReader
-            with open(path, "rb") as f:
-                reader = PdfReader(f)
-                for page in reader.pages:
-                    t = page.extract_text() or ""
-                    if t:
-                        text += t + "\n"
-                    if len(text) >= max_chars:
-                        break
-        elif ext == ".docx":
-            from docx import Document
-            doc = Document(path)
-            for p in doc.paragraphs:
-                if p.text:
-                    text += p.text + "\n"
-                if len(text) >= max_chars:
-                    break
-        elif ext == ".txt":
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read(max_chars)
-        else:
-            return ""
-    except Exception:
-        return ""
-    return text[:max_chars].strip()
-
-def gather_corpus(app: Flask, max_chars_total: int = 80_000) -> tuple[str, list[dict]]:
-    """
-    Bucketdəki bütün fayllardan mətni birləşdirir.
-    Qaytarır: (corpus_text, files_meta)
-    """
-    bucket = session.get("bucket")
-    if not bucket:
-        return "", []
-
-    bdir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-    if not bdir.exists():
-        return "", []
-
-    texts = []
-    metas = []
-    total = 0
-
-    # Son yüklənənlərdən başlayırıq
-    for p in sorted(bdir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if not p.is_file() or not allowed_file(p.name):
-            continue
-        remaining = max_chars_total - total
-        if remaining <= 0:
-            break
-        t = extract_text_from_file(p, max_chars=remaining)
-        if not t:
-            continue
-        texts.append(f"# {p.name.split('_',1)[-1]}\n{t}")
-        metas.append({
-            "name": p.name.split("_", 1)[-1],
-            "ext": p.suffix.lower().lstrip("."),
-            "pages": count_pages_saved_file(p),
-            "size_bytes": p.stat().st_size if p.exists() else 0
-        })
-        total += len(t)
-
-    return ("\n\n".join(texts)).strip(), metas
-
-def bump_session_stats(bytes_added: int = 0, pages_added: int = 0):
-    """Upload/Remove zamanı ölçü və səhifə sayını sessiya qeydinə əlavə/çıxar."""
-    try:
-        bucket = session.get("bucket")
-        if not bucket:
-            return
-        obj = UserSession.query.filter_by(bucket_uuid=bucket).first()
-        if not obj:
-            return
-        obj.files_count = max(obj.files_count or 0, 0)
-        if bytes_added:
-            obj.total_bytes = (obj.total_bytes or 0) + int(bytes_added)
-            if obj.total_bytes < 0:
-                obj.total_bytes = 0
-        if pages_added:
-            obj.total_pages = (obj.total_pages or 0) + int(pages_added)
-            if obj.total_pages < 0:
-                obj.total_pages = 0
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-
-def compute_bucket_stats(app: Flask) -> dict:
-    """Cari sessiya bucket-i üçün: files, pages, bytes."""
-    bucket = session.get("bucket")
-    stats = {"files": 0, "pages": 0, "bytes": 0}
-    if not bucket:
-        return stats
-
-    bdir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-    if bdir.exists():
-        for p in bdir.iterdir():
-            if p.is_file():
-                stats["files"] += 1
-                try:
-                    stats["bytes"] += p.stat().st_size
-                except Exception:
-                    pass
-                try:
-                    stats["pages"] += count_pages_saved_file(p)
-                except Exception:
-                    pass
-
-    try:
-        obj = UserSession.query.filter_by(bucket_uuid=bucket).first()
-        if obj:
-            stats["files"] = max(stats["files"], obj.files_count or 0)
-            stats["pages"] = max(stats["pages"], obj.total_pages or 0)
-            stats["bytes"] = max(stats["bytes"], obj.total_bytes or 0)
-    except Exception:
-        pass
-
-    return stats
-
-def expose_limits(app: Flask) -> dict:
-    """Şablona limitləri ötürmək üçün helper."""
-    return {
-        "max_files": app.config["MAX_FILES"],
-        "max_file_mb": app.config["MAX_FILE_MB"],
-        "max_total_pages": app.config["MAX_TOTAL_PAGES"],
-        "retention_hours": app.config["RETENTION_HOURS"],
-        "max_storage_mb_total": app.config["MAX_STORAGE_MB_TOTAL"],
-    }
-
-def list_bucket_files(app: Flask) -> list[dict]:
-    """
-    index.html üçün 'files' siyahısı:
-    {id, name, ext, pages, size_bytes}
-    """
-    bucket = session.get("bucket")
-    files = []
-    if not bucket:
-        return files
-
-    bdir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-    if not bdir.exists():
-        return files
-
-    for p in sorted(bdir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if not p.is_file():
-            continue
-        try:
-            pages = count_pages_saved_file(p)
-        except Exception:
-            pages = 0
-        try:
-            size_b = p.stat().st_size
-        except Exception:
-            size_b = 0
-
-        files.append({
-            "id": p.name,                         # remove üçün identifikator
-            "name": p.name.split("_", 1)[-1],     # orijinal adı göstər
-            "ext": p.suffix.lower().lstrip("."),
-            "pages": pages,
-            "size_bytes": size_b,
-        })
-    return files
-
-
-# ===================== App Factory =====================
-def create_app():
-    load_dotenv()
-    app = Flask(__name__, static_folder="static", template_folder="templates")
-    app.config.from_object(ProductionConfig)
-
-    # --- CSRF / Security ---
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-change-me')
-    app.config['WTF_CSRF_ENABLED'] = True
-    app.config['WTF_CSRF_TIME_LIMIT'] = None
-    app.config['WTF_CSRF_SSL_STRICT'] = False         # Referrer məcbur yoxlanmasın
-    app.config['WTF_CSRF_CHECK_ORIGIN'] = False       # (istəyə bağlı) origin yoxlaması
-    app.config['SESSION_COOKIE_SECURE'] = True
-    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-    csrf = CSRFProtect(app)
-
-    # Qovluqlar
-    Path("instance").mkdir(exist_ok=True)
-    Path(app.config["UPLOAD_FOLDER"]).mkdir(exist_ok=True, parents=True)
-
-    try:
-        from config import DB_DIR  
-        Path(DB_DIR).mkdir(exist_ok=True, parents=True)
-    except Exception:
-        pass
-
-
-
-
-    # DB
-    db.init_app(app)
-    with app.app_context():
-        db.create_all()
-
-    # Rate Limit (ENV-dən storage oxu; lokalda memory:// xəbərdarlığı susdurur)
-    storage_uri = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
-    limiter = Limiter(
-        get_remote_address,
-        app=app,
-        default_limits=["200 per day", "50 per hour"],
-        storage_uri=storage_uri
+def create_app() -> Flask:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    app = Flask(
+        __name__,
+        template_folder=os.path.join(BASE_DIR, "templates"),
+        static_folder=os.path.join(BASE_DIR, "static"),
     )
 
-    # ------------- Session/Bucket & Anon Tracking -------------
-    @app.before_request
-    def ensure_bucket_and_track():
-        # Sessiya bucket
-        if "bucket" not in session:
-            session["bucket"] = uuid.uuid4().hex
-        bucket = session["bucket"]
+    # --------------------
+    # Configuration
+    # --------------------
+    app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me")
+    app.config["UPLOAD_FOLDER"] = os.getenv("UPLOAD_FOLDER", os.path.join(os.getcwd(), "uploads"))
+    app.config["OUTPUT_FOLDER"] = os.getenv("OUTPUT_FOLDER", os.path.join(os.getcwd(), "outputs"))
+    app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB per request
+    app.config["MAX_TOTAL_PAGES"] = int(os.getenv("MAX_TOTAL_PAGES", "250"))
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_FILE_DIR"] = os.path.join(BASE_DIR, ".flask_session")
+    app.config["SESSION_PERMANENT"] = False
+    app.config["SESSION_USE_SIGNER"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = False  # dev mühitdə False, prod-da True
 
-        # Anonim iz (GDPR-dostu: IP hash, UA string)
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
-        ip_h = hash_ip(ip, app.config["PRIVACY_SALT"])
-        ua = request.headers.get("User-Agent", "")
+    # Session(app)
 
-        obj = UserSession.query.filter_by(bucket_uuid=bucket).first()
-        if not obj:
-            obj = UserSession(bucket_uuid=bucket, ip_hash=ip_h, user_agent=ua)
-            db.session.add(obj)
-        else:
-            obj.ip_hash = ip_h or obj.ip_hash
-            obj.user_agent = ua or obj.user_agent
-            obj.last_seen = datetime.utcnow()
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
+    # Ensure folders exist
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["OUTPUT_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["SESSION_FILE_DIR"], exist_ok=True)
 
-    # ------------- Security headers -------------
-    @app.after_request
-    def set_headers(resp):
-        resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-        # ⚠️ Referrer-Policy no-referrer DEYIL! CSRF üçün uyğun variant:
-        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        resp.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data:; "
-            "style-src 'self' 'unsafe-inline'; script-src 'self'"
-        )
-        return resp
 
-    # ------------- Light cleanup before each request -------------
-    @app.before_request
-    def maybe_cleanup():
-        try:
-            cleanup_storage(app)
-        except Exception:
-            pass
+    # CSRF
+    csrf = CSRFProtect()
+    csrf.init_app(app)
 
-    # ===================== Routes =====================
-    @app.route("/")
+    # Rate limiter (keep behavior if available)
+    if Limiter is not None:
+        limiter = Limiter(get_remote_address, app=app, default_limits=["120 per hour"])
+    else:
+        limiter = None  # type: ignore
+
+    # --------------------
+    # Helpers
+    # --------------------
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+
+    def _allowed_file(filename: str) -> bool:
+        _, ext = os.path.splitext(filename.lower())
+        return ext in ALLOWED_EXTENSIONS
+
+    def _register_pdf_font_if_available(c: Any) -> None:
+        """Register DejaVuSans if present for Unicode PDF output."""
+        if pdfmetrics is None or TTFont is None:
+            return
+        candidate_paths: List[str] = [
+            os.path.join("static", "fonts", "DejaVuSans.ttf"),
+            os.path.join(os.getcwd(), "static", "fonts", "DejaVuSans.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        for p in candidate_paths:
+            if os.path.isfile(p):
+                try:
+                    pdfmetrics.registerFont(TTFont("DejaVuSans", p))
+                    c.setFont("DejaVuSans", 11)
+                    return
+                except Exception:
+                    continue
+
+
+    def _pdf_write_multiline(c: Any, text: str, x: int = 50, y_start: int = 800, line_height: int = 16, right_margin: int = 50) -> None:
+        """
+        Wrap lines by visible width (points) so text fits the page.
+        """
+        # Page metrics
+        page_width, _ = c._pagesize  # e.g., 595 for A4 width (points)
+        max_width = page_width - x - right_margin
+
+        # Current font info (fallbacks)
+        font_name = getattr(c, "_fontname", "DejaVuSans")
+        font_size = getattr(c, "_fontsize", 11)
+
+        def wrap_by_width(line: str):
+            if not line:
+                yield ""
+                return
+            parts = re.split(r"(\s+)", line)  # keep spaces
+            buf = ""
+            buf_w = 0.0
+            for token in parts:
+                w = pdfmetrics.stringWidth(token, font_name, font_size)
+                if buf and (buf_w + w) > max_width:
+                    yield buf.rstrip()
+                    buf = token
+                    buf_w = w
+                else:
+                    buf += token
+                    buf_w += w
+            if buf:
+                yield buf.rstrip()
+
+        y = y_start
+        for raw_line in text.splitlines():
+            for phys_line in wrap_by_width(raw_line):
+                if y < 40:  # new page
+                    c.showPage()
+                    # re-apply font on new page
+                    try:
+                        c.setFont(font_name, font_size)
+                    except Exception:
+                        pass
+                    y = y_start
+                c.drawString(x, y, phys_line)
+                y -= line_height
+
+    # -----------------------------------------------------------------------------
+    # Routes
+    # -----------------------------------------------------------------------------
+
+    @app.get("/")
     def index():
-        stats = compute_bucket_stats(app)
-        limits = expose_limits(app)
-        files = list_bucket_files(app)
+        # limits for UI
+        limits = {
+            "max_files": 10,
+            "max_file_mb": 50,
+            "max_total_pages": 250,
+        }
 
-        # UI defaultları
+        # list uploaded files (basic metadata)
+        uploads_dir = current_app.config["UPLOAD_FOLDER"]
+        files = []
+        if os.path.isdir(uploads_dir):
+            for name in sorted(os.listdir(uploads_dir)):
+                path = os.path.join(uploads_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                size_bytes = os.path.getsize(path)
+                files.append({
+                    "id": name,  # used as fid in template
+                    "name": name,
+                    "ext": ext[1:].upper() if ext else "",
+                    "pages": 0,  # optional: real page count can be added later
+                    "size_bytes": size_bytes,
+                })
+
+        # options defaults
         options = {
             "task": "summary",
             "words": 800,
             "language": "English",
-            "output": "pdf",
-            "notes": ""
+            "output": "txt",
+            "notes": "",
         }
-        languages = ["English", "Azerbaijani", "Turkish", "Russian", "Polish"]
+        if "options" in session:
+            options.update(session["options"])
+
+        languages = [
+            "English","Polish","Turkish","Azerbaijani","Russian","German",
+            "French","Spanish","Italian","Portuguese","Ukrainian","Arabic",
+            "Chinese","Japanese","Korean","Hindi"
+        ]
+
+        stats = {
+            "files": len(files),
+            "pages": 0,
+            "bytes": sum(f["size_bytes"] for f in files)
+        }
+
         result_text = session.get("last_result_text", "")
 
         return render_template(
             "index.html",
-            stats=stats,
             limits=limits,
             files=files,
             options=options,
             languages=languages,
-            result_text=result_text,
+            stats=stats,
+            result_text=result_text
         )
 
-    @app.route("/healthz")
-    @csrf.exempt
-    def healthz():
-        return jsonify(ok=True, time=datetime.utcnow().isoformat())
-
-    @app.route("/privacy")
-    def privacy():
-        return render_template("privacy.html")
-
-    @app.route("/privacy/delete", methods=["POST"])
-    def privacy_delete():
-        bucket = session.get("bucket")
-        if not bucket:
-            abort(400, "No active session")
-
-        # DB-də işarələ
-        obj = UserSession.query.filter_by(bucket_uuid=bucket).first()
-        if obj:
-            obj.deleted_at = datetime.utcnow()
-            db.session.commit()
-
-        # Faylları sil
-        bdir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-        if bdir.exists():
-            for f in bdir.rglob("*"):
-                if f.is_file():
-                    f.unlink(missing_ok=True)
-            try:
-                bdir.rmdir()
-            except Exception:
-                pass
-
-        # Sessiyanı sıfırla
-        session.clear()
-        flash("Your data has been deleted.", "success")
-        return redirect(url_for("index"))
-
-    @app.route("/reset", methods=["POST"])
-    def reset():
-        bucket = session.get("bucket")
-        if bucket:
-            bdir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-            if bdir.exists():
-                for f in bdir.rglob("*"):
-                    if f.is_file():
-                        f.unlink(missing_okay=True)
-                try:
-                    bdir.rmdir()
-                except Exception:
-                    pass
-        session.clear()
-        flash("Session reset.", "info")
-        return redirect(url_for("index"))
-
-    # ---------- FILE UPLOAD ----------
-    @app.route("/upload", methods=["POST"])
-    @limiter.limit("10/minute")
+    @app.post("/upload")
     def upload():
-        bucket = session.get("bucket")
-        if not bucket:
-            flash("Session bucket not found.", "error")
+        if "files" not in request.files:
+            flash("No files part", "error")
             return redirect(url_for("index"))
-
-        bucket_dir = Path(app.config["UPLOAD_FOLDER"]) / bucket
-        bucket_dir.mkdir(parents=True, exist_ok=True)
 
         files = request.files.getlist("files")
-        if not files or all((f.filename or "").strip() == "" for f in files):
-            flash("No files selected.", "error")
-            return redirect(url_for("index"))
-
-        # Limitlər
-        existing_count = sum(1 for p in bucket_dir.iterdir() if p.is_file())
-        max_files = app.config["MAX_FILES"]
-        incoming_count = sum(1 for f in files if (f.filename or "").strip() != "")
-        if existing_count + incoming_count > max_files:
-            flash(f"Too many files. Limit: {max_files}. Remove some or reset.", "error")
-            return redirect(url_for("index"))
-
-        max_file_mb = app.config["MAX_FILE_MB"]
-        max_total_pages = app.config["MAX_TOTAL_PAGES"]
-
-        pages_this_upload = 0
-        saved_any = False
-
+        saved = 0
         for f in files:
-            filename = (f.filename or "").strip()
-            if not filename:
+            if not f or f.filename == "":
                 continue
-            if not allowed_file(filename):
-                flash(f"Not allowed file type: {filename}", "error")
+            if not _allowed_file(f.filename):
                 continue
+            fname = secure_filename(f.filename)
+            f.save(os.path.join(current_app.config["UPLOAD_FOLDER"], fname))
+            saved += 1
 
-            # Faylı saxla (unique adla)
-            safe_name = uuid.uuid4().hex + "_" + filename.replace("/", "_").replace("\\", "_")
-            target_path = bucket_dir / safe_name
-            try:
-                f.save(target_path.as_posix())
-            except Exception:
-                flash(f"Cannot save: {filename}", "error")
-                continue
-
-            # Ölçü limiti (MB)
-            try:
-                size_mb = target_path.stat().st_size / (1024 * 1024)
-            except Exception:
-                size_mb = 0
-
-            if size_mb > max_file_mb:
-                try:
-                    target_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                flash(f"File too large (> {max_file_mb} MB): {filename}", "error")
-                continue
-
-            # Səhifə sayı
-            pages = count_pages_saved_file(target_path)
-            if pages <= 0:
-                try:
-                    target_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                flash(f"Cannot read pages (corrupt?): {filename}", "error")
-                continue
-
-            if pages_this_upload + pages > max_total_pages:
-                try:
-                    target_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                flash(f"Total pages limit exceeded (>{max_total_pages}). '{filename}' skipped.", "error")
-                continue
-
-            # Stats
-            try:
-                bump_session_stats(bytes_added=target_path.stat().st_size, pages_added=pages)
-            except Exception:
-                pass
-
-            pages_this_upload += pages
-            saved_any = True
-
-        if not saved_any:
-            return redirect(url_for("index"))
-
-        flash("Files uploaded.", "success")
+        if saved == 0:
+            flash("No valid files uploaded.", "warning")
+        else:
+            flash(f"{saved} file(s) uploaded.", "success")
         return redirect(url_for("index"))
 
-    # ---------- FILE REMOVE ----------
-    @app.route("/remove/<path:fid>", methods=["POST"])
+    @app.post("/remove/<path:fid>")
     def remove(fid):
-        """Bucket içində konkret faylı silir."""
-        bucket = session.get("bucket")
-        if not bucket:
-            flash("No active session.", "error")
-            return redirect(url_for("index"))
-
-        target = Path(app.config["UPLOAD_FOLDER"]) / bucket / fid
-        if target.exists() and target.is_file():
-            try:
-                size_b = target.stat().st_size
-            except Exception:
-                size_b = 0
-
-            try:
-                target.unlink(missing_ok=True)
-                if size_b:
-                    bump_session_stats(bytes_added=-int(size_b), pages_added=0)
-                flash("File removed.", "info")
-            except Exception:
-                flash("Cannot remove this file.", "error")
-        else:
-            flash("File not found.", "error")
-
+        uploads_dir = current_app.config["UPLOAD_FOLDER"]
+        path = os.path.join(uploads_dir, fid)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                flash("File removed.", "success")
+            else:
+                flash("File not found.", "warning")
+        except Exception:
+            flash("Could not remove file.", "error")
         return redirect(url_for("index"))
 
-    # ---------- GENERATE (real LLM) ----------
-    @app.route("/generate", methods=["POST"])
-    @limiter.limit("6/minute")
-    def generate():
+    @app.post("/reset")
+    def reset():
+        # Clear session
+        session.clear()
+        # Clean uploads dir
+        uploads_dir = current_app.config["UPLOAD_FOLDER"]
+        try:
+            if os.path.isdir(uploads_dir):
+                for name in os.listdir(uploads_dir):
+                    path = os.path.join(uploads_dir, name)
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        flash("Session and uploads reset.", "success")
+        return redirect(url_for("index"))
+
+    # NOTE: Generate NOW updates the UI result first. Download happens only via /export.
+    if limiter:
+        @app.post("/generate")
+        @limiter.limit("6 per minute")
+        def generate():
+            return _generate_impl()
+    else:
+        @app.post("/generate")
+        def generate():
+            return _generate_impl()
+
+    def _generate_impl():
+        """
+        - Read task/words/language/output/notes
+        - Build corpus from uploaded files
+        - Build prompt and call API (or mock)
+        - Save ONLY to session and redirect to index (show in Result editor)
+        - Download happens later via /export
+        """
         task = request.form.get("task", "summary")
-        words = int(request.form.get("words", "800") or 800)
-        language = request.form.get("language", "English")
-        output = request.form.get("output", "pdf")
-        notes = request.form.get("notes", "")
+        words = int((request.form.get("words") or "800").strip() or 800)
+        language = request.form.get("language", "English").strip()
+        output = request.form.get("output", "txt").strip().lower()  # txt | docx | pdf
+        notes = request.form.get("notes", "").strip()
 
-        # Fayllardan korpus — DÜZGÜN ARGUMENT ADI
-        corpus, metas = gather_corpus(app, max_chars_total=120000)
-        if not corpus:
-            flash("No extracted text from your uploads. Please upload readable files.", "error")
-            return redirect(url_for("index"))
-
-        # OpenAI açarı yoxdursa DEMO nəticə ilə davam et
-        if not _OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
-            result_text = (
-                f"(Demo mode — please set OPENAI_API_KEY in .env)\n\n"
-                f"Task: {task}, Language: {language}, Target: ~{words} words\n\n"
-                f"Sources preview:\n{corpus[:1000]}"
-            )
-        else:
-            try:
-                # Real LLM cavabı (bizim call_llm modulundan)
-                llm_text = call_llm(task=task, words=words, language=language, notes=notes, corpus=corpus)
-                result_text = strip_banner(llm_text)
-            except Exception as e:
-                # LLM error zamanı fallback
-                result_text = f"(LLM error: {e})\n\n{corpus[:1200]}"
-
-        # Export üçün sessiyada saxla
-        session["export_format"] = output
-        session["last_result_text"] = result_text
-
-        # index üçün kontekst
-        stats = compute_bucket_stats(app)
-        limits = expose_limits(app)
-        files = list_bucket_files(app)
-        options = {"task": task, "words": words, "language": language, "output": output, "notes": notes}
-        languages = ["English", "Azerbaijani", "Turkish", "Russian", "Polish"]
-
-        flash("Generated.", "success")
-        return render_template(
-            "index.html",
-            stats=stats,
-            limits=limits,
-            files=files,
-            options=options,
-            languages=languages,
-            result_text=result_text,
+        options = GenerateOptions(
+            task=task,
+            words=words,
+            language=language,
+            notes=notes,
+            output=output,
         )
 
-    # ---------- EXPORT (TXT / PDF / DOCX) ----------
-    @app.route("/export", methods=["POST"])
-    @limiter.limit("20/hour")
+        # Persist minimal session state (keeps UI behavior)
+        session["options"] = {
+            "task": options.normalized_task(),
+            "words": options.clamped_words(),
+            "language": options.normalized_language(),
+            "output": options.normalized_output(),
+            "notes": options.notes,
+        }
+
+        # Build corpus
+        corpus, _metas = FileAnalyzer.extract_corpus(app, max_chars=120_000)
+
+        # Generate
+        service = SummarizerService()
+        result_text = service.generate(corpus, options)
+
+        # Store only, DO NOT download here
+        session["last_result_text"] = result_text
+
+        flash("Generated. Review the result on the right, then use 'Save & Download'.", "success")
+        return redirect(url_for("index"))
+
+    @app.post("/export")
     def export():
-        # Form boş gələrsə sessiyadan götür
-        raw = request.form.get("result_text")
-        result_text = (raw if raw is not None and raw.strip() != "" else session.get("last_result_text", "")).strip()
-        result_text = strip_banner(result_text)  # <<< başlıq və errorları burda da təmizlə
-        if not result_text:
-            flash("Nothing to export.", "error")
+        text = request.form.get("result_text", "").strip()
+        if not text:
+            flash("Nothing to export.", "warning")
             return redirect(url_for("index"))
 
-        # Seçilən formatı götür (form > session > txt)
-        fmt = (request.form.get("output") or session.get("export_format") or "txt").lower()
-        if fmt not in {"pdf", "docx", "txt"}:
-            fmt = "txt"
+        opts = session.get("options", {}) or {}
+        output = (opts.get("output") or "txt").lower()
 
-        bucket = session.get("bucket", "session")
-        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        options = GenerateOptions(
+            task=opts.get("task", "summary"),
+            words=int(opts.get("words", 800)),
+            language=opts.get("language", "English"),
+            notes=opts.get("notes", ""),
+            output=output
+        )
+        base_name = build_base_filename(options)
 
-        if fmt == "pdf":
-            # -------- PDF export (reportlab) --------
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.units import cm
-            from reportlab.pdfbase import pdfmetrics
-            from reportlab.pdfbase.ttfonts import TTFont
-
-            FONT_PATH = os.path.join(app.root_path, "static", "fonts", "DejaVuSans.ttf")
-            # Font mövcuddursa register et
-            font_name = "Helvetica"
-            try:
-                if os.path.exists(FONT_PATH):
-                    pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
-                    font_name = "DejaVuSans"
-            except Exception:
-                pass
-
-            bio = BytesIO()
-            c = canvas.Canvas(bio, pagesize=A4)
-            width, height = A4
-
-            # Marginlər
-            left, right = 2 * cm, width - 2 * cm
-            top, bottom = height - 2 * cm, 2 * cm
-            max_width = right - left
-            line_height = 14
-
-            # Mətni sətirlərə böl
-            c.setFont(font_name, 11)
-            avg_char_w = 5.0
-            chars_per_line = max(40, int(max_width / avg_char_w))
-            lines = []
-            for para in result_text.splitlines():
-                if not para.strip():
-                    lines.append("")
-                else:
-                    lines.extend(wrap(para, width=chars_per_line))
-
-            y = top
-            for line in lines:
-                if y <= bottom:
-                    c.showPage()
-                    c.setFont(font_name, 11)
-                    y = top
-                c.drawString(left, y, line)
-                y -= line_height
-
-            c.save()
-            bio.seek(0)
-            fname = f"summary_{bucket[:8]}_{ts}.pdf"
-            return send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fname)
-
-        elif fmt == "docx":
-            # -------- DOCX export (python-docx) --------
-            from docx import Document
-            from docx.shared import Pt
-
-            doc = Document()
-            style = doc.styles["Normal"].font
-            style.name = "Calibri"
-            style.size = Pt(11)
-
-            for block in result_text.split("\n\n"):
-                p = doc.add_paragraph()
-                lines = block.splitlines()
-                if not lines:
-                    p.add_run("")
-                else:
-                    p.add_run(lines[0])
-                    for ln in lines[1:]:
-                        p.add_run("\n" + ln)
-
-            bio = BytesIO()
-            doc.save(bio)
-            bio.seek(0)
-            fname = f"summary_{bucket[:8]}_{ts}.docx"
-            return send_file(
-                bio,
-                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                as_attachment=True,
-                download_name=fname
-            )
-
+        if output == "pdf":
+            path = os.path.join(current_app.config["OUTPUT_FOLDER"], f"{base_name}.pdf")
+            return _export_pdf(text, path, f"{base_name}.pdf")
+        elif output == "docx":
+            path = os.path.join(current_app.config["OUTPUT_FOLDER"], f"{base_name}.docx")
+            return _export_docx(text, path, f"{base_name}.docx")
         else:
-            # -------- TXT export --------
-            bio = BytesIO(result_text.encode("utf-8"))
-            fname = f"summary_{bucket[:8]}_{ts}.txt"
-            return send_file(
-                bio,
-                mimetype="text/plain; charset=utf-8",
-                as_attachment=True,
-                download_name=fname
-            )
+            return _export_txt(text, f"{base_name}.txt")
+
+    @app.get("/health")
+    def health():
+        return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+    # -----------------------------------------------------------------------------
+    # Export helpers
+    # -----------------------------------------------------------------------------
+
+    def _export_txt(text: str, download_name: str):
+        bio = io.BytesIO()
+        bio.write(text.encode("utf-8"))
+        bio.seek(0)
+        session["last_result_path"] = None
+        return send_file(
+            bio,
+            mimetype="text/plain; charset=utf-8",
+            as_attachment=True,
+            download_name=download_name,
+        )
+
+    def _export_docx(text: str, path: str, download_name: str):
+        if Document is None:
+            return _export_txt(text, download_name.replace(".docx", ".txt"))
+
+        doc = Document()
+        for block in text.split("\n\n"):
+            p = doc.add_paragraph()
+            for line in block.splitlines():
+                p.add_run(line)
+                p.add_run("\n")
+        doc.save(path)
+        session["last_result_path"] = path
+        return send_file(
+            path,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            as_attachment=True,
+            download_name=download_name,
+        )
+
+    def _export_pdf(text: str, path: str, download_name: str):
+        if canvas is None:
+            return _export_txt(text, download_name.replace(".pdf", ".txt"))
+
+        c = canvas.Canvas(path)
+        _register_pdf_font_if_available(c)
+        try:
+            c.setFont("DejaVuSans", 11)
+        except Exception:
+            pass
+        _pdf_write_multiline(c, text, x=50, y_start=800, line_height=16)
+        c.showPage()
+        c.save()
+        session["last_result_path"] = path
+        return send_file(
+            path,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=download_name,
+        )
 
     return app
 
 
-# ------------------------ LOCAL DEV ENTRY ------------------------
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    app = create_app()
-    app.run(debug=True)
+    # Enable host/port override via env
+    host = os.getenv("FLASK_RUN_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_RUN_PORT", "5000"))
+    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    create_app().run(host=host, port=port, debug=debug)

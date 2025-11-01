@@ -129,3 +129,124 @@ body{margin:0;overflow:hidden}
   overflow: auto;      
   box-sizing: border-box;
 }
+
+
+/* -------------------- */
+/* Base tweaks          */
+/* -------------------- */
+:root{
+  --pad: 16px;
+  --gap: 16px;
+}
+
+.card { border-radius: 14px; }
+button, .btn { min-height: 40px; }
+
+/* Məzmun editoru mobilə uyğun yüksəklik */
+.result .editor{
+  min-height: 40vh;
+  line-height: 1.5;
+  overflow: auto;
+}
+
+/* -------------------- */
+/* Tablet (≤ 1024px)    */
+/* -------------------- */
+@media (max-width: 1024px){
+  .split{
+    display: grid;
+    grid-template-columns: 340px 1fr; /* sol panel bir az daralır */
+    gap: var(--gap);
+  }
+  .panel.left{ position: relative; }
+  .panel.right{ position: relative; }
+  .grid{
+    grid-template-columns: 1fr 1fr;  /* 2 sütun */
+    gap: var(--gap);
+  }
+  .segmented{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .segmented .seg{
+    flex: 1 1 calc(50% - 8px);
+  }
+  .result .editor{ min-height: 48vh; }
+}
+
+/* -------------------- */
+/* Phone (≤ 768px)      */
+/* -------------------- */
+@media (max-width: 768px){
+  .split{
+    display: block;     /* iki panel alt-alta */
+  }
+  .panel.left,
+  .panel.right{
+    width: 100%;
+    padding: var(--pad) 0;
+  }
+  .card{ margin-bottom: var(--gap); }
+
+  /* Options: grid-dən 1 sütuna düşür */
+  .grid{
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--gap);
+  }
+
+  /* Segmented radios – 2 sütun və ya tam eni */
+  .segmented{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .segmented .seg{
+    width: 100%;
+    margin: 0;
+  }
+
+  /* Yükləmə və statistik bloklar tam eni alsın */
+  .uploader, .uploader-stats, .filelist{
+    width: 100%;
+  }
+
+  /* Sticky actions mobil üçün aşağıda rahat klik */
+  .actions.sticky{
+    position: sticky;
+    bottom: 0;
+    padding: 8px 0;
+    background: inherit;
+  }
+
+  /* Yazı ölçüləri bir az kiçiltsin ki, sıxmadan sığsın */
+  h1{ font-size: clamp(20px, 4vw, 28px); }
+  h2{ font-size: clamp(18px, 3.5vw, 24px); }
+  h3{ font-size: clamp(16px, 3.2vw, 20px); }
+  .card-head.compact h2{ font-size: clamp(16px, 3.2vw, 20px); }
+
+  /* Editor */
+  .result .editor{
+    min-height: 50vh;
+    font-size: 14.5px;
+  }
+
+  /* Dropzone yazısı incəlsin və yığcamlaşsın */
+  .dropzone .dz-text b{ font-size: 14px; }
+  .dz-meta{ font-size: 12px; opacity: .8; }
+}
+
+/* -------------------- */
+/* Small phones (≤ 480) */
+/* -------------------- */
+@media (max-width: 480px){
+  .segmented{
+    grid-template-columns: 1fr; /* hamısı alt-alta */
+  }
+  .uploader-actions .btn,
+  .result .actions .btn{
+    width: 100%;
+  }
+  .chips .chip{ font-size: 11px; padding: 4px 6px; }
+  .result .editor{ font-size: 14px; }
+}
