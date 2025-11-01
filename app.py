@@ -224,10 +224,9 @@ def create_app() -> Flask:
                     "id": name,  # used as fid in template
                     "name": name,
                     "ext": ext[1:].upper() if ext else "",
-                    "pages": pages,  # optional: real page count can be added later
+                    "pages": 0,  # optional: real page count can be added later
                     "size_bytes": size_bytes,
                 })
-                total_pages += pages
 
         # options defaults
         options = {
