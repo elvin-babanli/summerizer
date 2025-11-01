@@ -1,55 +1,55 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- CSRF token (JS lazım olarsa oxumaq üçün) -->
-  <meta name="csrf-token" content="{{ csrf_token() }}">
-  <!-- Referrer no-referrer olmasın -->
-  <meta name="referrer" content="strict-origin-when-cross-origin">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-
+  <meta http-equiv="x-ua-compatible" content="ie=edge" />
   <title>Summerizer</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
 </head>
 <body>
-  <!-- TOP BAR -->
-  <header class="topbar">
+
+  <!-- Header -->
+  <header class="app-header">
     <div class="brand">
-      <div class="logo-dot"></div>
+      <div class="dot"></div>
       <span>Summerizer</span>
     </div>
 
-    <div class="top-controls">
-      <!-- Reset current session -->
+    <nav class="header-actions">
       <form action="{{ url_for('reset') }}" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn ghost" title="Reset current session">Reset session</button>
+        <button class="btn ghost">Reset session</button>
       </form>
-
-      <!-- Flash messages / idle status -->
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          {% for category, msg in messages %}
-            <div class="status {{ category }}">{{ msg }}</div>
-          {% endfor %}
-        {% else %}
-          <div class="status idle">Ready.</div>
-        {% endif %}
-      {% endwith %}
-    </div>
+      <div class="ready-badge">Ready.</div>
+    </nav>
   </header>
 
-  <!-- MAIN -->
-  <main class="viewport">
+  <!-- Flash toasts -->
+  <div class="toasts">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="toast {{ category|default('info') }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+  </div>
+
+  <!-- Main -->
+  <main class="shell">
     {% block content %}{% endblock %}
   </main>
 
-  <!-- FOOTER -->
-  <footer class="footbar">
-    <div class="foot-inner">
-      <span class="muted tiny">© 2025 Summerizer</span>
-    </div>
-  </footer>
+  <script>
+    // Auto-hide toasts
+    setTimeout(() => {
+      document.querySelectorAll('.toast').forEach(t => t.classList.add('hide'));
+    }, 2500);
+  </script>
 </body>
 </html>

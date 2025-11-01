@@ -4,6 +4,12 @@ try:
     from flask_session import Session
 except Exception:
     Session = None
+
+try:
+    from PyPDF2 import PdfReader
+except Exception:
+    PdfReader = None  # type: ignore
+
 import os
 import io
 import re
@@ -194,6 +200,7 @@ def create_app() -> Flask:
         # list uploaded files (basic metadata)
         uploads_dir = current_app.config["UPLOAD_FOLDER"]
         files = []
+        total_pages = 0
         if os.path.isdir(uploads_dir):
             for name in sorted(os.listdir(uploads_dir)):
                 path = os.path.join(uploads_dir, name)
@@ -201,6 +208,18 @@ def create_app() -> Flask:
                     continue
                 ext = os.path.splitext(name)[1].lower()
                 size_bytes = os.path.getsize(path)
+
+                pages = 0
+                if ext == ".pdf":
+                    try:
+                        from PyPDF2 import PdfReader  # local import to avoid hard fail if missing
+                        with open(path, "rb") as fh:
+                            pages = len(PdfReader(fh).pages)
+                    except Exception:
+                        pages = 0
+
+
+
                 files.append({
                     "id": name,  # used as fid in template
                     "name": name,
@@ -228,7 +247,7 @@ def create_app() -> Flask:
 
         stats = {
             "files": len(files),
-            "pages": 0,
+            "pages": total_pages,
             "bytes": sum(f["size_bytes"] for f in files)
         }
 
