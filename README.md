@@ -110,8 +110,7 @@ This project reflects a developer mindset focused on **clarity, scalability, and
 > He has been not only a great teacher but also a true mentor who inspired me to keep improving and building meaningful projects. 🙌  
 
 ---
-
 <h3 align="center">👤 Developed by <a href="https://github.com/elvin-babanli">Elvin Babanli</a></h3>
 <p align="center">
-  <i>Aspiring Software Engineer · AI Integration · Flask & FastAPI Enthusiast · Problem Solver</i>
+  <i>Computer Engineering Student · Learning Flask, FastAPI & AI Integration · Passionate about Building Real-World Projects</i>
 </p>
