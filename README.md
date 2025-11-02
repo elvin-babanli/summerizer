@@ -98,6 +98,6 @@ It demonstrates:
 
 ---
 
-![Summerizer App Screenshot](https://github.com/elvin-babanli/summerizer/blob/main/assets/Screenshot.png)
+![Summerizer App Screenshot](https://github.com/elvin-babanli/summerizer/blob/main/assets/screenshot.png)
 
 
