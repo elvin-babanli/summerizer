@@ -2,7 +2,7 @@
   <img src="assets/screenshot.png" alt="Summerizer Screenshot" width="900">
 </p>
 
-<h1 align="center">🧠 Summerizer — AI-Powered Document Summarizer</h1>
+<h1 align="center">🧠 Summarizer — AI-Powered Document Summarizer</h1>
 
 <p align="center">
   <b>Flask · OpenAI · PDF/Text Processing · Deployed on Render</b><br>
@@ -13,7 +13,7 @@
 
 ## 🧩 Overview
 
-**Summerizer** is a production-ready AI web application that automatically summarizes long-form documents (PDF, DOCX, TXT).  
+**Summarizer** is a production-ready AI web application that automatically summarizes long-form documents (PDF, DOCX, TXT).  
 Designed for simplicity and performance, it helps students, researchers, and professionals turn large materials into clear summaries, notes, or presentation outlines — within seconds.
 
 ---
