@@ -10,7 +10,6 @@
 </p>
 
 ---
-
 ## 🧩 Overview
 
 **Summarizer** is a production-ready AI web application that automatically summarizes long-form documents (PDF, DOCX, TXT).  
