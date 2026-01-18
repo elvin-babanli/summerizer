@@ -64,6 +64,7 @@ Designed for simplicity and performance, it helps students, researchers, and pro
 
 ---
 
+
 ## 🌐 Live Demo & Repository
 
 🔗 **Live Demo:** [https://summerizer-ubum.onrender.com](https://summerizer-ubum.onrender.com)  
